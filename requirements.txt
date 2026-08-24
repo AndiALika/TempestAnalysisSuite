@@ -1,0 +1,16 @@
+# TEMPEST Analysis Suite — runtime dependencies
+# Install with:  pip install -r requirements.txt
+customtkinter>=5.2.2
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+pandas>=2.0
+reportlab>=4.0
+Pillow>=10.0
+
+# ── Optional ─────────────────────────────────────────────────────────────────
+# soundfile      # 24-bit / float WAV support (falls back to stdlib wave if absent)
+# pyrtlsdr       # real RTL-SDR live capture backend (needs Zadig/WinUSB driver)
+# SoapySDR       # generic SDR backend (HackRF, LimeSDR, Airspy, PlutoSDR, …)
+# uhd            # Ettus USRP backend
+# pyinstaller    # to build a standalone .exe (see build_exe.ps1)

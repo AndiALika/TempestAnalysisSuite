@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Build artifacts (rebuild with build_exe.ps1 / tempest_suite.spec)
+build/
+dist/
+*.manifest
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
