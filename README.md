@@ -1,6 +1,6 @@
 # TEMPEST Analysis Suite
 
-**MSc Telecommunications Engineering — thesis tool**
+**MSc Telecommunications Engineering — thesis tool by Andi Lika**
 
 A desktop application for analysing **compromising electromagnetic emanations
 (TEMPEST)** and the shielding / zoning countermeasures against them. It combines
