@@ -34,9 +34,13 @@ ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")     # base theme; colours overridden below
 
 # Retint the widgets whose accent isn't set per-instance (sliders, switches,
-# checkboxes) so the crimson accent is applied consistently everywhere.
+# checkboxes, dropdowns) so the crimson accent is applied consistently
+# everywhere.  Values are hardcoded here (rather than referencing the palette
+# below) because this runs before that block is defined.
 def _retint():
     _A, _H = "#c62f55", "#ad2647"
+    _TXT, _TXT2 = "#141417", "#6b6b73"     # TEXT_PRI / TEXT_SEC
+    _WHITE, _TINT = "#ffffff", "#f4dbe2"   # BG_PANEL / soft crimson hover tint
     try:
         t = ctk.ThemeManager.theme
         for k in ("progress_color", "button_color"):
@@ -45,6 +49,20 @@ def _retint():
         t["CTkSwitch"]["progress_color"] = _A
         for k in ("fg_color", "hover_color"):
             t["CTkCheckBox"][k] = _A if k == "fg_color" else _H
+        # CTkOptionMenu's default text_color (#DCE4EE, pale) is meant for a
+        # saturated-blue fill; on our light grey fg_color it was near-invisible
+        # ("grey on grey", reads as unselected). Fix the text/dropdown colours
+        # app-wide — fg_color/button_color are already set per-instance.
+        om = t["CTkOptionMenu"]
+        om["text_color"] = _TXT
+        om["text_color_disabled"] = _TXT2
+        om["button_hover_color"] = _H
+        # The dropdown *popup* is a separate internal widget with its own theme
+        # section ("DropdownMenu", not "CTkOptionMenu") — style that too.
+        dm = t["DropdownMenu"]
+        dm["fg_color"] = _WHITE
+        dm["text_color"] = _TXT
+        dm["hover_color"] = _TINT
     except Exception:
         pass
 _retint()
