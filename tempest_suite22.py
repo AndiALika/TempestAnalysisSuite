@@ -20,12 +20,13 @@ import tempest_dsp as dsp      # signal ingestion & spectral analysis core (see 
 import tempest_report as rep   # PNG / CSV / PDF / session export (see tempest_report.py)
 import tempest_measure as tm   # measured-trace import & field-strength calibration
 import tempest_sdr as sdrlib   # SDR capture abstraction + simulated backend
+import tempest_capture_io as cio  # import recorded captures (SigMF / raw IQ / WAV)
 import tempest_video as tv     # van Eck video-emanation reconstruction
 import tempest_compliance as tc  # emission-limit masks & pass/fail evaluation
 import tempest_room as tr       # per-wall shielding, inspectable-space & design solver
 import tempest_signal as tsig   # peak detection, harmonic families & device classification
 from tkinter import filedialog as _fd
-import threading, queue
+import threading, queue, time
 
 # ─────────────────────────────────────────────
 #  App-wide theme
@@ -2187,10 +2188,11 @@ class MaterialAdvisor(ctk.CTkFrame):
 #  MODULE 7 – LIVE SDR CAPTURE
 # ─────────────────────────────────────────────────────────────────────────────
 class LiveSDRCapture(ctk.CTkFrame):
-    """Real-time spectrum + waterfall from an SDR.  Uses the simulated backend
-    when no hardware/driver is present; a real receiver (RTL-SDR, …) is selected
-    from the Backend menu.  Capture runs on a worker thread; the UI is refreshed
-    from a queue via ``after`` so Tk is only ever touched on the main thread."""
+    """Real-time spectrum + waterfall from an SDR — live hardware (RTL-SDR, …)
+    or the simulated backend, OR an **imported recording** (SigMF / raw IQ /
+    WAV, from this device or another SDR) played back through the exact same
+    pipeline. Capture runs on a worker thread; the UI is refreshed from a
+    queue via ``after`` so Tk is only ever touched on the main thread."""
 
     WATERFALL_ROWS = 120
     BLOCK = 4096
@@ -2200,11 +2202,14 @@ class LiveSDRCapture(ctk.CTkFrame):
         self._sdr = None
         self._thread = None
         self._running = False
+        self._active_mode = None       # "live" | "file" — which button/status to reset on stop
         self._queue = queue.Queue(maxsize=8)
         self._wf = None
         self._freqs = None
         self._after_id = None
         self._last_raw = None          # (freqs, relative-dB mag) for ref calibration
+        self._loaded_capture = None    # dict from tempest_capture_io.load_capture()
+        self._file_rows = []           # widgets in the folder-scan list, for cleanup
         self._build_ui()
 
     def _build_ui(self):
@@ -2280,6 +2285,39 @@ class LiveSDRCapture(ctk.CTkFrame):
                                    font=ctk.CTkFont(size=11))
         self.status.grid(row=0, column=10, padx=16)
 
+        # ── File Playback ("upload a capture") ──────────────────────────────
+        fp = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=10,
+                          border_width=1, border_color=BORDER)
+        fp.pack(fill="x", padx=24, pady=(0, 10))
+        ctk.CTkLabel(fp, text="📂  Imported capture:", text_color=TEXT_PRI,
+                     font=ctk.CTkFont(size=12, weight="bold")
+                     ).grid(row=0, column=0, padx=(14, 10), pady=(10, 2), sticky="w")
+        ctk.CTkButton(fp, text="Load File…", width=110, fg_color=BG_CARD, hover_color=BORDER,
+                      text_color=TEXT_PRI, command=self._load_file_dialog
+                      ).grid(row=0, column=1, padx=4, pady=(10, 2))
+        ctk.CTkButton(fp, text="Load Folder…", width=110, fg_color=BG_CARD, hover_color=BORDER,
+                      text_color=TEXT_PRI, command=self._load_folder_dialog
+                      ).grid(row=0, column=2, padx=4, pady=(10, 2))
+        self.file_loop = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(fp, text="Loop", variable=self.file_loop,
+                      font=ctk.CTkFont(size=11)).grid(row=0, column=3, padx=(10, 4), pady=(10, 2))
+        self.file_play_btn = ctk.CTkButton(fp, text="▶ Play file", width=100, fg_color=ACCENT2,
+                                           text_color="#ffffff", hover_color="#26744a",
+                                           font=ctk.CTkFont(weight="bold"), state="disabled",
+                                           command=self._toggle_file)
+        self.file_play_btn.grid(row=0, column=4, padx=(4, 14), pady=(10, 2))
+
+        self.file_info_lbl = ctk.CTkLabel(fp, text="No capture loaded — load a file or a folder "
+                                          "of recordings (SigMF, raw IQ, or WAV).",
+                                          text_color=TEXT_SEC, font=ctk.CTkFont(size=11),
+                                          anchor="w", justify="left")
+        self.file_info_lbl.grid(row=1, column=0, columnspan=5, padx=14, pady=(0, 8), sticky="w")
+
+        self.file_list = ctk.CTkScrollableFrame(fp, fg_color="transparent", height=110)
+        self.file_list.grid(row=2, column=0, columnspan=5, padx=10, pady=(0, 10), sticky="ew")
+        fp.columnconfigure(4, weight=1)
+        self.file_list.grid_remove()      # shown only once a folder is scanned
+
         self.fig, (self.ax_spec, self.ax_wf) = plt.subplots(
             2, 1, figsize=(11, 6), gridspec_kw={"height_ratios": [1, 1.5]}, **PLOT_PARAMS)
         self.fig.tight_layout(pad=3.0)
@@ -2305,21 +2343,50 @@ class LiveSDRCapture(ctk.CTkFrame):
                 g(self.gain_var, 20))
 
     def _toggle(self):
-        self.stop() if self._running else self._start()
+        if self._running and self._active_mode == "live":
+            self.stop()
+        else:
+            self.stop()                # stop file playback first if that was active
+            self._start()
 
     def _start(self):
         fc, fs, gain = self._params()
         backend = self.backend_var.get().split()[0]        # strip "(n/a)"
         device = None if self.tie_var.get() == "(none)" else self.tie_var.get()
         try:
-            self._sdr = sdrlib.open_sdr(backend, sample_rate=fs, center_freq=fc,
-                                        gain=gain, device=device)
+            src = sdrlib.open_sdr(backend, sample_rate=fs, center_freq=fc,
+                                  gain=gain, device=device)
         except Exception as e:
             messagebox.showerror("SDR open failed", str(e)); return
+        self._begin_capture(src, "live", f"Capturing @ {fc/1e6:.3f} MHz  |  {backend}")
+
+    def _toggle_file(self):
+        if self._running and self._active_mode == "file":
+            self.stop(); return
+        if not self._loaded_capture:
+            messagebox.showinfo("No capture loaded", "Load a file or folder first."); return
+        self.stop()                    # stop live capture first if that was active
+        info = self._loaded_capture
+        src = sdrlib.FileSDRSource(info["iq"], info["fs"], center_freq=info["fc"] or 0.0,
+                                   loop=self.file_loop.get()).open()
+        status = (f"Playing {os.path.basename(info['path'])}  |  fs={info['fs']/1e6:.3f} MHz")
+        if info["fc"]:
+            status += f"  |  fc={info['fc']/1e6:.3f} MHz"
+        status += f"  |  {info['duration_s']:.1f}s"
+        status += "  |  looping" if self.file_loop.get() else "  |  single pass"
+        self._begin_capture(src, "file", status)
+
+    def _begin_capture(self, src, mode, status_text):
+        """Shared start-up for both live hardware and file-playback sources —
+        both are just an :class:`SDRSource`, so the worker/poll/plot pipeline
+        below never needs to know which one it's driving."""
+        self._sdr = src
+        self._active_mode = mode
         self._wf = None; self._freqs = None
         self._running = True
-        self.start_btn.configure(text="⏸  Stop", fg_color=WARN, text_color=BG_DARK)
-        self.status.configure(text=f"Capturing @ {fc/1e6:.3f} MHz  |  {backend}", text_color=ACCENT2)
+        btn = self.start_btn if mode == "live" else self.file_play_btn
+        btn.configure(text="⏸  Stop", fg_color=WARN, text_color=BG_DARK)
+        self.status.configure(text=status_text, text_color=ACCENT2)
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
         self._after_id = self.after(60, self._poll)
@@ -2334,7 +2401,9 @@ class LiveSDRCapture(ctk.CTkFrame):
             try: self._sdr.close()
             except Exception: pass
             self._sdr = None
+        self._active_mode = None
         self.start_btn.configure(text="▶  Start", fg_color=ACCENT2, text_color="#ffffff")
+        self.file_play_btn.configure(text="▶ Play file", fg_color=ACCENT2, text_color="#ffffff")
         self.status.configure(text="Idle", text_color=TEXT_SEC)
 
     def _worker(self):
@@ -2351,6 +2420,12 @@ class LiveSDRCapture(ctk.CTkFrame):
                 except queue.Empty: pass
             try: self._queue.put_nowait((f, mag))
             except queue.Full: pass
+            if isinstance(self._sdr, sdrlib.FileSDRSource):
+                # File reads are near-instant numpy slicing (unlike hardware
+                # I/O, which paces itself) — sleep to the recording's own time
+                # base so the waterfall stays meaningful and the thread doesn't
+                # spin the CPU.
+                time.sleep(min(0.2, self.BLOCK / self._sdr.sample_rate))
 
     def _apply_cal(self, mag):
         if not self.cal_on.get():
@@ -2365,6 +2440,8 @@ class LiveSDRCapture(ctk.CTkFrame):
 
     def _poll(self):
         if not self._running: return
+        if self._sdr is not None and getattr(self._sdr, "at_end", False):
+            self.stop(); return        # single-pass file playback reached the end
         latest = None
         while not self._queue.empty():
             try: latest = self._queue.get_nowait()
@@ -2441,6 +2518,143 @@ class LiveSDRCapture(ctk.CTkFrame):
             f"= {known_dbuv:.1f} dBµV.\n\nReference offset set to {offset:.1f} dB. "
             f"The field-strength axis now applies AF / cable / gain on top of this.")
         self._update_plots(f, mag)
+
+    # ── imported-capture loading ("upload a file / folder") ─────────────────
+    def _load_file_dialog(self):
+        filetypes = [
+            ("SigMF", "*.sigmf-meta *.sigmf-data"),
+            ("WAV", "*.wav"),
+            ("Raw IQ", " ".join(f"*{e}" for e in cio.RAW_EXTENSIONS)),
+            ("All files", "*.*"),
+        ]
+        path = _fd.askopenfilename(title="Load a captured SDR recording",
+                                   filetypes=filetypes)
+        if not path: return
+        self._load_path(path)
+
+    def _load_folder_dialog(self):
+        folder = _fd.askdirectory(title="Select a folder of captured recordings")
+        if not folder: return
+        try:
+            entries = cio.scan_folder(folder)
+        except Exception as e:
+            messagebox.showerror("Scan failed", str(e)); return
+        self._populate_file_list(entries)
+
+    def _populate_file_list(self, entries):
+        for w in self._file_rows: w.destroy()
+        self._file_rows = []
+        if not entries:
+            self.file_list.grid_remove()
+            messagebox.showinfo("No captures found",
+                "No recognised capture files (SigMF / raw IQ / WAV) were found "
+                "in that folder.")
+            return
+        self.file_list.grid()
+        for e in entries:
+            row = ctk.CTkFrame(self.file_list, fg_color=BG_CARD, corner_radius=6)
+            row.pack(fill="x", pady=2, padx=2)
+            detail = e["format"].upper()
+            if e.get("fs"):
+                detail += f"  ·  {e['fs']/1e6:.3f} MHz"
+            if e.get("fc"):
+                detail += f"  @ {e['fc']/1e6:.3f} MHz"
+            detail += f"  ·  {e['size_bytes']/1024:,.0f} KB"
+            if e["needs_format"]:
+                detail += "  ·  needs format"
+            ctk.CTkButton(row, text=f"{e['rel_path']}   —   {detail}", anchor="w",
+                         fg_color="transparent", hover_color=BORDER, text_color=TEXT_PRI,
+                         font=ctk.CTkFont(size=11),
+                         command=lambda p=e["path"]: self._load_path(p)
+                         ).pack(fill="x", padx=6, pady=4)
+            self._file_rows.append(row)
+
+    def _load_path(self, path):
+        fmt = cio.detect_format(path)
+        try:
+            if fmt == "raw":
+                picked = self._prompt_raw_format(path)
+                if picked is None: return          # user cancelled the dialog
+                dtype_key, fs_hint, fc_hint = picked
+                info = cio.load_capture(path, dtype_key=dtype_key,
+                                        fs_hint=fs_hint, fc_hint=fc_hint)
+            else:
+                info = cio.load_capture(path)
+        except Exception as e:
+            messagebox.showerror("Load failed", str(e)); return
+
+        self._loaded_capture = info
+        self.file_play_btn.configure(state="normal")
+        fc_txt = f"{info['fc']/1e6:.3f} MHz" if info["fc"] else "not set"
+        trunc = (f"  ⚠ truncated to first {info['n_samples']:,} of "
+                 f"{info['n_samples_total']:,} samples" if info["truncated"] else "")
+        self.file_info_lbl.configure(
+            text=(f"✅ {os.path.basename(info['path'])}  ·  {info['format'].upper()}"
+                 f"  ·  fs={info['fs']/1e6:.3f} MHz  ·  fc={fc_txt}"
+                 f"  ·  {info['duration_s']:.2f}s  ·  {info['n_samples']:,} samples{trunc}"),
+            text_color=ACCENT2)
+
+    def _prompt_raw_format(self, path):
+        """Small modal collecting sample format / rate / centre-frequency for a
+        headerless raw IQ file (it carries no self-describing metadata, unlike
+        SigMF). Returns ``(dtype_key, fs_hz, fc_hz)``, or ``None`` if cancelled.
+        """
+        top = ctk.CTkToplevel(self)
+        top.title("Raw IQ format")
+        top.geometry("400x300")
+        top.transient(self.winfo_toplevel())
+        top.grab_set()
+        result = {}
+
+        ctk.CTkLabel(top, text=os.path.basename(path),
+                     font=ctk.CTkFont(size=12, weight="bold"), text_color=TEXT_PRI
+                     ).pack(anchor="w", padx=16, pady=(16, 4))
+        ctk.CTkLabel(top, text="This file has no metadata — specify how it was "
+                     "recorded (as with rtl_sdr, hackrf_transfer, or a GNU Radio "
+                     "file sink):", text_color=TEXT_SEC, font=ctk.CTkFont(size=11),
+                     wraplength=360, justify="left").pack(anchor="w", padx=16, pady=(0, 10))
+
+        ctk.CTkLabel(top, text="Sample format", text_color=TEXT_SEC,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
+        labels = [spec["label"] for spec in cio.RAW_DTYPES.values()]
+        label_to_key = {spec["label"]: key for key, spec in cio.RAW_DTYPES.items()}
+        fmt_var = ctk.StringVar(value=cio.RAW_DTYPES[cio.DEFAULT_RAW_DTYPE]["label"])
+        ctk.CTkOptionMenu(top, values=labels, variable=fmt_var, fg_color=BG_CARD,
+                          button_color=ACCENT).pack(fill="x", padx=16, pady=(2, 10))
+
+        ctk.CTkLabel(top, text="Sample rate (MHz)", text_color=TEXT_SEC,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
+        fs_var = ctk.StringVar(value=self.fs_var.get())
+        ctk.CTkEntry(top, textvariable=fs_var, fg_color=BG_CARD, border_color=BORDER
+                    ).pack(fill="x", padx=16, pady=(2, 10))
+
+        ctk.CTkLabel(top, text="Centre frequency (MHz) — optional", text_color=TEXT_SEC,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
+        fc_var = ctk.StringVar(value=self.fc_var.get())
+        ctk.CTkEntry(top, textvariable=fc_var, fg_color=BG_CARD, border_color=BORDER
+                    ).pack(fill="x", padx=16, pady=(2, 4))
+
+        def _ok():
+            try:
+                fs_hz = float(fs_var.get()) * 1e6
+                fc_hz = float(fc_var.get()) * 1e6 if fc_var.get().strip() else None
+                if fs_hz <= 0: raise ValueError("sample rate must be positive")
+            except ValueError as e:
+                messagebox.showerror("Invalid input",
+                                     f"Sample rate / frequency must be numbers ({e})."); return
+            result["value"] = (label_to_key[fmt_var.get()], fs_hz, fc_hz)
+            top.destroy()
+
+        btns = ctk.CTkFrame(top, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(14, 16))
+        ctk.CTkButton(btns, text="Cancel", fg_color=BG_CARD, hover_color=BORDER,
+                     text_color=TEXT_PRI, command=top.destroy
+                     ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ctk.CTkButton(btns, text="Load", fg_color=ACCENT, hover_color=ACCENT_HV,
+                     command=_ok).pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+        top.wait_window()
+        return result.get("value")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

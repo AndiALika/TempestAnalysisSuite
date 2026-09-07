@@ -108,6 +108,81 @@ class SimulatedSDR(SDRSource):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  File-playback source ("upload a capture" — files from other SDR devices)
+# ─────────────────────────────────────────────────────────────────────────────
+class FileSDRSource(SDRSource):
+    """Replays a pre-loaded IQ array through the exact same interface as a live
+    backend, so an imported recording (RTL-SDR/HackRF/USRP/... capture, or a
+    SigMF file) flows through the same worker-thread/spectrum/waterfall
+    pipeline as live hardware — no other code needs to know the difference.
+
+    Pass the ``iq`` array (from :func:`tempest_capture_io.load_capture`) plus
+    its ``sample_rate`` and ``center_freq``.  When the file is exhausted it
+    either loops back to the start (``loop=True``, default — useful for a
+    short recording) or pads with silence (``loop=False``).
+    """
+
+    def __init__(self, iq, sample_rate, center_freq=0.0, loop=True):
+        super().__init__(sample_rate, center_freq, gain=0.0)
+        self._iq = np.asarray(iq, dtype=np.complex64)
+        self._pos = 0
+        self.loop = bool(loop)
+
+    def read(self, n):
+        n = int(n)
+        out = np.zeros(n, dtype=np.complex64)
+        if self._iq.size == 0:
+            return out
+        filled = 0
+        while filled < n:
+            remaining = self._iq.size - self._pos
+            if remaining <= 0:
+                if self.loop:
+                    self._pos = 0
+                    continue
+                break                                   # leave the rest zero-padded
+            take = min(remaining, n - filled)
+            out[filled:filled + take] = self._iq[self._pos:self._pos + take]
+            self._pos += take
+            filled += take
+        return out
+
+    @property
+    def progress(self):
+        """Fraction of the recording played so far, in [0, 1]."""
+        return self._pos / self._iq.size if self._iq.size else 0.0
+
+    @property
+    def duration_s(self):
+        return self._iq.size / self.sample_rate if self.sample_rate else 0.0
+
+    @property
+    def at_end(self):
+        return (not self.loop) and self._pos >= self._iq.size
+
+
+def open_file_source(path, dtype_key=None, fs_hint=None, fc_hint=None, loop=True,
+                     max_samples=None):
+    """Load a capture file (SigMF / WAV / raw IQ — see
+    :mod:`tempest_capture_io`) and return an **opened** :class:`FileSDRSource`.
+
+    For headerless raw files, ``dtype_key`` and ``fs_hint`` are required —
+    the GUI collects these from the user when the format can't be
+    auto-detected. ``fc_hint`` overrides/fills the centre frequency when the
+    file doesn't carry one (SigMF captures usually do; raw files never do).
+    """
+    import tempest_capture_io as cio
+    kwargs = dict(dtype_key=dtype_key, fs_hint=fs_hint, fc_hint=fc_hint)
+    if max_samples is not None:
+        kwargs["max_samples"] = max_samples
+    info = cio.load_capture(path, **kwargs)
+    src = FileSDRSource(info["iq"], info["fs"],
+                        center_freq=info["fc"] or 0.0, loop=loop).open()
+    src.info = info          # stash the full metadata dict for the GUI to show
+    return src
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Backend discovery & factory
 # ─────────────────────────────────────────────────────────────────────────────
 def available_backends():
@@ -274,6 +349,6 @@ def capture_spectrum(iq, sample_rate, center_freq, nfft=4096, window="Hann"):
 
 
 __all__ = [
-    "SDRSource", "SimulatedSDR",
-    "available_backends", "open_sdr", "capture_spectrum",
+    "SDRSource", "SimulatedSDR", "FileSDRSource",
+    "available_backends", "open_sdr", "open_file_source", "capture_spectrum",
 ]

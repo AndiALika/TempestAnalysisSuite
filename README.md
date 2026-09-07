@@ -45,7 +45,7 @@ python -m unittest test_tempest_physics test_tempest_dsp test_tempest_report \
 | 4 | **Room TEMPEST Assessment** | Per-wall shielding + window/door apertures, **inspectable-space / eavesdropper** field analysis, and a **design solver** (required wall SE / standoff / material). |
 | 5 | **Emanation Coverage & Interception Map** | Field-strength **coverage heatmap** (dBµV/m) with the **interception boundary** contour, **two-ray multipath**, near/far-field boundaries, a placed **eavesdropper** verdict, and a radial field profile. Wavefront animation kept as a secondary view. |
 | 6 | **Shielding Design Optimizer** | Finds the lightest/cheapest shield (single or **2-layer laminate**) that brings a **source under a limit** — a *derived*, frequency-dependent requirement `SE_req(f)=source−limit`; real SE margin, mass (kg) & cost (USD), with a mass–cost Pareto. |
-| 7 | **Live SDR Capture** | Real-time spectrum + waterfall. Backends: simulated (no hardware), RTL-SDR, SoapySDR, UHD. Reference-level calibration to dBµV/m. |
+| 7 | **Live SDR Capture** | Real-time spectrum + waterfall. Backends: simulated (no hardware), RTL-SDR, SoapySDR, UHD — **or an imported recording** (SigMF, raw IQ from any SDR, or WAV; load a single file or scan a whole folder) played back through the same pipeline. Reference-level calibration to dBµV/m. |
 | 8 | **Van Eck Reconstruction** | Reconstructs an eavesdropped screen image from a display's video emanation; autocorrelation line/frame-rate lock and frame averaging. |
 
 ---
@@ -62,11 +62,14 @@ tempest_suite22.py        GUI (customtkinter) — 8 modules, presentation only
 ├─ tempest_measure.py     measured-trace import + antenna-factor calibration chain
 ├─ tempest_compliance.py  emission-limit masks + pass/fail
 ├─ tempest_room.py        per-wall shielding, inspectable space, design solver
-├─ tempest_sdr.py         SDR capture abstraction + simulated/real backends
+├─ tempest_sdr.py         SDR capture abstraction + simulated/real backends +
+│                         file-playback source (imported recordings)
+├─ tempest_capture_io.py  import recorded captures: SigMF, raw IQ (cu8/cs8/
+│                         cs16/cf32), WAV; folder scanning
 ├─ tempest_video.py       van Eck raster reconstruction
 └─ tempest_report.py      PNG / CSV / PDF / JSON-session export
 
-test_tempest_*.py         119 unit tests (one suite per core module)
+test_tempest_*.py         155 unit tests (one suite per core module)
 tempest_samples/          ready-made .wav / .iq / .csv test inputs (+ its README)
 ```
 
@@ -102,6 +105,34 @@ via the measured-overlay features to obtain data-driven results.
 
 `tempest_samples/` contains ready-made inputs (5 WAV, 3 IQ, 3 CSV traces) with
 their own README describing which module and settings each exercises.
+
+### Importing external SDR captures
+
+The **Live SDR Capture** module can play back a recording made by *any* SDR
+(RTL-SDR, HackRF, USRP, SDR#, GQRX, ...) through the same spectrum/waterfall
+pipeline as a live device — load a single file or scan a whole folder.
+
+Supported formats:
+* **SigMF** (`.sigmf-data` + `.sigmf-meta`) — sample rate & centre frequency
+  are read automatically from the metadata.
+* **Raw interleaved IQ** (`.cu8`/`.iq`/`.dat`/`.bin`, `.cs8`, `.cs16`, `.cf32`)
+  — the headerless native output of tools like `rtl_sdr` (cu8) and
+  `hackrf_transfer` (cs8). Since these carry no metadata, the app prompts for
+  the sample format, sample rate and centre frequency when one is loaded.
+* **WAV** — stereo I/Q recordings as saved by SDR#/HDSDR.
+
+Real, downloadable IQ recordings to test with:
+* **[IQEngine](https://www.iqengine.org/)** — a public, community-shared
+  library of real-world SigMF recordings, browsable and downloadable directly
+  ([source](https://github.com/IQEngine/IQEngine)).
+* **[SigMF Recordings Repo](https://wiki.gnuradio.org/index.php?title=SigMF_Recordings_Repo)**
+  (GNU Radio wiki) — a curated list of example SigMF captures.
+* **[Zenodo](https://zenodo.org/)** — search "IQ recording" / "SDR capture" for
+  citable, DOI-archived real-world datasets (e.g. satellite/amateur-radio
+  recordings).
+* **[PySDR — IQ Files & SigMF](https://pysdr.org/content/iq_files.html)** — a
+  tutorial on the file formats themselves, useful background before importing
+  a real capture.
 
 ---
 
