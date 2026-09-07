@@ -55,6 +55,8 @@ BG_PANEL  = "#ffffff"   # cards / panels / plot background
 BG_CARD   = "#f4f4f6"   # inner tiles / inputs
 ACCENT    = "#c62f55"   # crimson — primary, active, brand, alert
 ACCENT_HV = "#ad2647"   # crimson hover
+ACCENT_SEL    = "#8a1d38"   # darker crimson — persistent "selected" state (nav, chosen option)
+ACCENT_SEL_HV = "#6e1730"   # darker still — hover while selected
 ACCENT2   = "#2f8f5b"   # muted green — success / positive
 WARN      = "#b57d1e"   # amber — warnings / thresholds
 TEXT_PRI  = "#141417"   # near-black text
@@ -819,8 +821,8 @@ class ShieldingCalculator(ctk.CTkFrame):
         for w in self.result_frame.winfo_children(): w.destroy()
         cards = []
         if enc is not None:
-            cards.append(("Enclosure SE @ mid", enc[mid], "dB", "#f43f5e"))
-        cards.append(("SE @ mid-freq", SE[mid], "dB", ACCENT2))
+            cards.append(("Enclosure SE at Mid-Band Frequency", enc[mid], "dB", "#f43f5e"))
+        cards.append(("Shielding Effectiveness at Mid-Band Frequency", SE[mid], "dB", ACCENT2))
         cards.append(("Min SE (band)", worst, "dB", "#22d3ee"))
         if not multilayer:
             cards += [("Absorption (A)", A[mid], "dB", ACCENT),
@@ -832,7 +834,8 @@ class ShieldingCalculator(ctk.CTkFrame):
         for label, val, unit, color in cards:
             card = ctk.CTkFrame(self.result_frame, fg_color=BG_CARD, corner_radius=8)
             card.pack(fill="x", pady=3)
-            ctk.CTkLabel(card, text=label, font=ctk.CTkFont(size=11), text_color=TEXT_SEC).pack(anchor="w", padx=10, pady=(5, 0))
+            ctk.CTkLabel(card, text=label, font=ctk.CTkFont(size=11), text_color=TEXT_SEC,
+                        wraplength=230, justify="left").pack(anchor="w", padx=10, pady=(5, 0))
             ctk.CTkLabel(card, text=f"{val:.1f} {unit}", font=ctk.CTkFont(size=15, weight="bold"),
                          text_color=color).pack(anchor="w", padx=10, pady=(0, 5))
 
@@ -2804,9 +2807,12 @@ class TempestApp(ctk.CTk):
             f.lift() if k == key else f.lower()
         for k, btn in self._nav_btns.items():
             active = k == key
+            # Selected nav item gets a darker, muted crimson fill (ACCENT_SEL) so
+            # it reads as "you are here" and is never confused with the brighter
+            # ACCENT used for primary action buttons elsewhere in the app.
             btn.configure(
-                fg_color=ACCENT if active else "transparent",
-                hover_color=ACCENT_HV if active else SIDEBAR_HOVER,
+                fg_color=ACCENT_SEL if active else "transparent",
+                hover_color=ACCENT_SEL_HV if active else SIDEBAR_HOVER,
                 text_color="#ffffff" if active else SIDEBAR_TEXT,
                 font=ctk.CTkFont(size=13, weight="bold" if active else "normal")
             )
